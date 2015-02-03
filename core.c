@@ -142,7 +142,6 @@ int main(void) {
  */
 ISR(TIMER0_OVF_vect) {
 
-
 	#ifdef MODE_SERVO
 	static int oldError = 0, currentError = 0;
 	oldError = currentError;
@@ -182,7 +181,7 @@ ISR(TIMER0_OVF_vect) {
 		{
 			// set direction
 			currentState = requestedState;
-
+			
 			// set pins
 			//if(currentState == forwards) goForwards(); else goBackwards();
 
@@ -217,8 +216,6 @@ ISR(TIMER0_OVF_vect) {
 		}
 		// else do nothing
 	}
-
-
 }
 
 /**
