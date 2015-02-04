@@ -1,11 +1,10 @@
 /**
  *
  *
+ * Fuses: HIGH = 0xCF, LOW = 0x2E
  */
 #define F_CPU 16000000UL
 #include <avr/io.h>
-//#include <avr/pgmspace.h>
-//#include <stdint.h>
 #include <util/delay.h>
 #include <avr/interrupt.h>
 //#include <math.h>
@@ -18,10 +17,10 @@
 
 /** Defaults */
 const int fetDelay = 200; // 200 microseconds
-const int defaultMinPulse = 2000; // 1 millisecond
-const int defaultMaxPulse = 4000; // 2 millisecond
+const int defaultMinPulse = 2000; // 1 millisecond, in 0.5us ticks
+const int defaultMaxPulse = 4000; // 2 millisecond, in 0.5us ticks
 const int defaultMinPosition = 0; // pot fully down
-const int defaultMaxPosition = 1023; // pot fully up
+const int defaultMaxPosition = 255; // pot fully up
 const int kProportional = 1;
 const int kDifferential = 0;
 const int maxSlew = 30;
@@ -34,7 +33,6 @@ volatile int requestedPosition = 0; // global requested position
 volatile int currentPosition = 0;   // global current position
 volatile char timeout = 0;
 volatile char failsafe = 0;
-volatile unsigned char lets_get_high = 0; // legacy
 int minPulse = 0;
 int maxPulse = 0;
 int minPosition = 0;
@@ -78,32 +76,32 @@ int main(void) {
 	// RC pin set up
 	enbRCpin;
 	MCUCR |= _BV(ISC00); // RC pin change triggers interrupt
-	GICR |= _BV(INT0); // enable RC pin interrupt
+	GICR  |= _BV(INT0); // enable RC pin interrupt
 
 	// Timer 0 set up - control loop interrupt
-	TCCR0 |= _BV(CS02); // set to 62.5KHz, overflows @ 245Hz
+	TCCR0 |= _BV(CS01) | _BV(CS00); // set to 250KHz, overflows @ 1KHz
 
 	// Timer 1 set up - RC pulse timing
 	TCCR1A = 0x00;
 	TCCR1B = _BV(CS11); // set to 2MHz, overflows @ 32.8ms, normal mode
 
 	// Timer 2 set up - H-Bridge PWM
-	OCR2 = 0x00;
+	OCR2  = 0x00;
 	TCCR2 = _BV(CS21); // set to 2MHz, overflows @ 7.8KHz, normal mode, OC2 disconnected
 
 	// Timer interrupts
-	TIFR = 0x00; // clear flags
+	TIFR  = 0x00; // clear flags
 	TIMSK = _BV(OCIE2) | _BV(TOIE2) | _BV(TOIE1) | _BV(TOIE0); // enable all timers for overflow and timer2 match
 
 	/** Read EEPROM for saved values, if empty (0xFF) use defaults. */
 	minPulse = eeprom_read_word((unsigned int*)0x0000);
-	if(minPulse == 0xFFFF) minPulse = defaultMinPulse;
+	if((unsigned int)minPulse == 0xFFFF) minPulse = defaultMinPulse;
 	maxPulse = eeprom_read_word((unsigned int*)0x0002);
-	if(maxPulse == 0xFFFF) maxPulse = defaultMaxPulse;
+	if((unsigned int)maxPulse == 0xFFFF) maxPulse = defaultMaxPulse;
 	minPosition = eeprom_read_word((unsigned int*)0x0004);
-	if(minPosition == 0xFFFF) minPosition = defaultMinPosition;
+	if((unsigned int)minPosition == 0xFFFF) minPosition = defaultMinPosition;
 	maxPosition = eeprom_read_word((unsigned int*)0x0006);
-	if(maxPosition == 0xFFFF) maxPosition = defaultMaxPosition;
+	if((unsigned int)maxPosition == 0xFFFF) maxPosition = defaultMaxPosition;
 
 	// initialise states
 	requestedState = brake;
@@ -113,9 +111,12 @@ int main(void) {
 
 	_delay_ms(100);
 
-	sei(); // enable global interrupts
+	// ADC set up
+	ADCSRA |= _BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0); // set to 125KHz sample rate
+	ADMUX  |= _BV(REFS0) | _BV(ADLAR); // Set ADC reference to AVCC, left adjust ADC result
+	// need to enable, enable interrupts and free running mode
 
-	// ADC setup
+	sei(); // enable global interrupts
 
 	#ifdef CALIBRATE
 
@@ -169,7 +170,7 @@ ISR(TIMER0_OVF_vect) {
 	if(requestedVelocity < 0)
 	{
 		requestedState = backwards;
-		requestedVelocity *= -1; // make positive value 0 - 255
+		requestedVelocity = -requestedVelocity; // make positive value 0 - 255
 	}
 	else if(requestedVelocity > 0) requestedState = forwards;
 	else requestedState = brake;
@@ -181,25 +182,24 @@ ISR(TIMER0_OVF_vect) {
 		{
 			// set direction
 			currentState = requestedState;
-			
-			// set pins
-			//if(currentState == forwards) goForwards(); else goBackwards();
 
-			// increase speed
-			if(requestedVelocity > (OCR2 + maxSlew)) OCR2 += maxSlew;
-			else OCR2 = requestedVelocity;
+			// set pins
+			if(currentState == forwards) goForwards();
+			else goBackwards();
+
+			// requestedState = currentState, speed increases will be done elsewhere.
 		}
 		else // fwd to bwk or bwk to fwd
 		{
 			// decrease speed
-			if(requestedVelocity < (OCR2 - maxSlew)) OCR2 -= maxSlew;
-			else OCR2 = requestedVelocity;
-
-			// set pins
-			// braking();
-
-			// set direction
-			if(OCR2 == 0) currentState = brake;
+			if(OCR2 > maxSlew) OCR2 -= maxSlew;
+			else
+			{
+				// close enough to jump to brake state
+				OCR2 = 0;
+				currentState = brake;
+				braking();
+			}
 		}
 	}
 	else // fwd to fwd, brake to brake, bwd to bwd
@@ -238,7 +238,7 @@ ISR(INT0_vect) {
 	{
 		pulseLength = TCNT1; // copy timer1
 
-		if(pulseLength >= minPulse && pulseLength <= maxPulse) // valid pulse?
+		if(pulseLength >= (unsigned int)minPulse && pulseLength <= (unsigned int)maxPulse) // valid pulse?
 		{
 			// valid pulse, therefore map to requested variable
 			#ifdef MODE_SERVO
@@ -266,10 +266,12 @@ ISR(INT0_vect) {
  *
  */
 ISR(TIMER2_COMP_vect) {
-    if (OCR2 < 255) {
-        if (currentState != brake) {
-            //Clear high
-            clrForwardHigh;
+
+	if (OCR2 < 255)
+	{
+        if (currentState != brake)
+		{
+			clrForwardHigh; // clear high side gates
             clrBackwardHigh;
         }
     }
@@ -279,20 +281,25 @@ ISR(TIMER2_COMP_vect) {
  *
  */
 ISR(TIMER2_OVF_vect) {
-    if (OCR2 > 0) {
-        if (currentState == forwards) {
-            setForwardHigh;
-        } else if (currentState == backwards) {
-            setBackwardHigh;
-        }
+
+	static unsigned char counterCharge = 0;
+    if (OCR2 > 0)
+	{
+        if (currentState == forwards) setForwardHigh;
+        else if (currentState == backwards) setBackwardHigh;
     }
-    if (OCR2 > 250 && currentState != brake) {
-        lets_get_high++; //Gotta keep the charge pump circuit charged
-        if (lets_get_high > 50) { //If it hasn't had a chance to charge in a while
-            clrForwardHigh; //Clear it then reset counter
-            clrBackwardHigh; //Now pumped up and remaining high so we don't nasty shoot through which ends in magic smoke :)
-            lets_get_high = 0;
+
+	if (OCR2 > 250)
+	{
+        // The IR2101 gate drivers don't have internal charge pump, so
+		// need to drop high side every ~6.5 milliseconds to recharge.
+		if (counterCharge > 50)
+        {
+			clrForwardHigh;
+            clrBackwardHigh;
+            counterCharge = 0;
         }
+		else counterCharge ++;
     }
 }
 
@@ -359,10 +366,10 @@ void braking(void) {
  */
 void motorBeep(unsigned char length) {
 	OCR2 = 10;
-	unsigned char count = 0;
-	while (count < length)
+	unsigned char countBeep = 0;
+	while (countBeep < length)
 	{
-		if (count % 2)
+		if (countBeep % 2)
 		{
 			goForwards();
 		}
@@ -371,7 +378,7 @@ void motorBeep(unsigned char length) {
 			goBackwards();
 		}
 		_delay_ms(200);
-		count++;
+		countBeep++;
 		braking();
 		_delay_ms(300);
 	}
