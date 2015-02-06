@@ -17,10 +17,12 @@
 
 /** Defaults */
 const unsigned int fetDelay = 200; // 200 microseconds
-const int defaultMinPulse = 2000; // 1 millisecond, in 0.5us ticks
-const int defaultMaxPulse = 4000; // 2 millisecond, in 0.5us ticks
+const int defaultMinPulse = 2000; // 1 millisecond, in 0.4us ticks
+const int defaultMaxPulse = 4000; // 2 millisecond, in 0.4us ticks
 const int defaultMinPosition = 0; // pot fully down
 const int defaultMaxPosition = 255; // pot fully up
+const unsigned char defaultTempHot = 170;
+const unsigned char defaultTempWarm = 180;
 const int kProportional = 1;
 const int kDifferential = 0;
 const int maxSlew = 30;
@@ -37,6 +39,8 @@ int minPulse = 0;
 int maxPulse = 0;
 int minPosition = 0;
 int maxPosition = 0;
+unsigned char temperatureHot = 0;
+unsigned char temperatureWarm = 0;
 
 /** Pin Map */
 #define readRCpin (PIND &= _BV(2)) // Port D, Pin 2 - RC signal input
@@ -44,16 +48,16 @@ int maxPosition = 0;
 #define selPosPin 0b00000010 // Port C, Pin 2 - position sensor input
 #define enbForwardHigh (DDRC |= _BV(5)) // Port C, Pin 5 - high side gate, forward
 #define setForwardHigh (PORTC |= _BV(5))
-#define clrForwardHigh (PORTC &= !_BV(5))
+#define clrForwardHigh (PORTC &= ~_BV(5))
 #define enbForwardLow (DDRD |= _BV(5)) // Port D, Pin 5 - low side gate, forwards
 #define setForwardLow (PORTD |= _BV(5))
-#define clrForwardLow (PORTD &= !_BV(5))
+#define clrForwardLow (PORTD &= ~_BV(5))
 #define enbBackwardHigh (DDRD |= _BV(4)) // Port D, Pin 4 - high side gate, backwards
 #define setBackwardHigh (PORTD |= _BV(4))
-#define clrBackwardHigh (PORTD &= !_BV(4))
-#define enbBackwardLow (DDRC |= _BV(4))// Port C, Pin 4 - low side gate, backwards
+#define clrBackwardHigh (PORTD &= ~_BV(4))
+#define enbBackwardLow (DDRC |= _BV(4)) // Port C, Pin 4 - low side gate, backwards
 #define setBackwardLow (PORTC |= _BV(4))
-#define clrBackwardLow (PORTC &= !_BV(4))
+#define clrBackwardLow (PORTC &= ~_BV(4))
 
 /** Prototypes */
 long map(long x, long in_min, long in_max, long out_min, long out_max);
@@ -61,6 +65,7 @@ void goForwards(void);
 void goBackwards(void);
 void braking(void);
 void motorBeep(unsigned char length);
+unsigned char readAnalogue(void);
 
 
 int main(void) {
@@ -105,6 +110,10 @@ int main(void) {
 	if((unsigned int)minPosition == 0xFFFF) minPosition = defaultMinPosition;
 	maxPosition = eeprom_read_word((unsigned int*)0x0007);
 	if((unsigned int)maxPosition == 0xFFFF) maxPosition = defaultMaxPosition;
+	temperatureHot = eeprom_read_byte((unsigned char*)0x08);
+	if(temperatureHot == 0xFF) temperatureHot = defaultTempHot;
+	temperatureWarm = eeprom_read_byte((unsigned char*)0x09);
+	if(temperatureWarm == 0xFF) temperatureWarm = defaultTempWarm;
 
 	// initialise states
 	tempState = cool;
@@ -117,21 +126,67 @@ int main(void) {
 	// ADC set up
 	ADCSRA |= _BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0); // set to 125KHz sample rate
 	ADMUX  |= _BV(REFS0) | _BV(ADLAR); // Set ADC reference to AVCC, left adjust ADC result
-	// need to enable, enable interrupts and free running mode
+	ADCSRA |= _BV(ADEN)  | _BV(ADIE) | _BV(ADIF); // enable ADC & interrupts, clear flag
+	ADCSRA |= _BV(ADFR)  | _BV(ADSC); // enable free running & start
 
 	sei(); // enable global interrupts
 
+	// Finished initializing the Motor Controller
+
 	#ifdef CALIBRATE
 
-	// temperature limits
-	// exponential?
-	// slew rate
+	unsigned char counterCal = 0;
 
-	eeprom_write_word((unsigned int*)0x0000, 0xFFFF); // new minPulse
-	eeprom_write_word((unsigned int*)0x0002, 0xFFFF); // new maxPulse
-	eeprom_write_word((unsigned int*)0x0004, 0xFFFF); // new minPosition
-	eeprom_write_word((unsigned int*)0x0006, 0xFFFF); // new maxPosition
-	#endif
+	if(failsafe < 10)
+	{
+		// receiving valid pulses
+		if(requestedVelocity > 100 && requestedState == forwards)
+		{
+			// stick at max
+			while(counterCal < 199 && requestedVelocity > 100 && requestedState == forwards)
+			{
+				// check it stays at max for 2 seconds
+				_delay_ms(10);
+				counterCal++;
+			}
+
+			if(counterCal > 190)
+			{
+
+				// calibrate RC
+
+				// calibrate Slew Rate
+
+				// calibrate Expo
+
+				// calibrate Temp
+
+				#ifdef MODE_SERVO
+
+				// calibrate pot
+
+				#endif // MODE_SERVO
+
+				eeprom_write_word((unsigned int*)0x0001, 0xFFFF); // new minPulse
+				eeprom_write_word((unsigned int*)0x0003, 0xFFFF); // new maxPulse
+				eeprom_write_word((unsigned int*)0x0005, 0xFFFF); // new minPosition
+				eeprom_write_word((unsigned int*)0x0007, 0xFFFF); // new maxPosition
+				eeprom_write_byte((unsigned char*)0x008, 0xFF);   // new temperatureHot
+				eeprom_write_byte((unsigned char*)0x009, 0xFF);   // new temperatureWarm
+
+				// signal completed calibration
+				motorBeep(2);
+
+			}
+		}
+		motorBeep(2);
+	}
+	else motorBeep(1);
+	// add a retry functionality?
+
+	_delay_ms(500);
+
+	#endif // CALIBRATE
 
 	motorBeep(3);
 
@@ -156,7 +211,7 @@ ISR(TIMER0_OVF_vect) {
 	// PD calculation
 	requestedVelocity   = kProportional * currentError;
 	requestedVelocity  += kDifferential * (currentError - oldError);
-	#endif
+	#endif // MODE_SERVO
 
 	// clamp
 	if(requestedVelocity > 255) requestedVelocity = 255;
@@ -183,11 +238,8 @@ ISR(TIMER0_OVF_vect) {
 	{
 		if(currentState == brake) // brake to fwd or brake to bwd
 		{
-			// set direction
-			currentState = requestedState;
-
-			// set pins
-			if(currentState == forwards) goForwards();
+			// set pins & direction
+			if(requestedState == forwards) goForwards();
 			else goBackwards();
 
 			// requestedState = currentState, speed increases will be done elsewhere.
@@ -200,7 +252,6 @@ ISR(TIMER0_OVF_vect) {
 			{
 				// close enough to jump to brake state
 				OCR2 = 0;
-				currentState = brake;
 				braking();
 			}
 		}
@@ -246,10 +297,11 @@ ISR(INT0_vect) {
 			// valid pulse, therefore map to requested variable
 			#ifdef MODE_SERVO
 				requestedPosition = map(pulseLength, minPulse, maxPulse, 0, 512); // map pulse to position
-				currentPosition = map(ADC_pin, minPosition, maxPosition, 0, 512); // get & map error signal
+				unsigned char readPosition = readAnalogue();
+				currentPosition = map(readPosition, minPosition, maxPosition, 0, 512); // get & map error signal
 			#else // default to ESC mode
 				requestedVelocity = map(pulseLength, minPulse, maxPulse, -255, 255); // output value in -255 to +255
-			#endif
+			#endif // MODE_SERVO
 
 			if(timeout < 3) timeout = 0; // clear timeout 3 times faster than it accumulates
 			else timeout -= 3;
@@ -286,6 +338,7 @@ ISR(TIMER2_COMP_vect) {
 ISR(TIMER2_OVF_vect) {
 
 	static unsigned char counterCharge = 0;
+
     if (OCR2 > 0)
 	{
         if (currentState == forwards) setForwardHigh;
@@ -294,8 +347,8 @@ ISR(TIMER2_OVF_vect) {
 
 	if (OCR2 > 250)
 	{
-        // The IR2101 gate drivers don't have internal charge pump, so
-		// need to drop high side every ~6.5 milliseconds to recharge.
+        // The IR2101 gate drivers don't have an internal charge pump,
+		// so need to drop high side every ~6.5 milliseconds to recharge.
 		if (counterCharge > 50)
         {
 			clrForwardHigh;
@@ -304,6 +357,20 @@ ISR(TIMER2_OVF_vect) {
         }
 		else counterCharge ++;
     }
+}
+
+/**
+ *
+ */
+ISR(ADC_vect) {
+
+	if (ADCH < temperatureHot)
+	{
+		tempState = hot;
+		requestedState = brake;
+	}
+	else if (ADCH < temperatureWarm) tempState = warm;
+	else tempState = cool;
 }
 
 /** Re-maps a number from one range to another.
@@ -394,5 +461,29 @@ void motorBeep(unsigned char length) {
 
 	TCCR0 = savedTimer0Ctrl; // restart timer0
 
+}
+
+/**
+ *
+ */
+unsigned char readAnalogue(void) {
+
+	cli();
+
+	ADCSRA &= ~_BV(ADFR); // stop free running ADC
+	ADMUX = (ADMUX & 0xF0) | selPosPin; // select pot, keep rate the same
+
+	while(ADCSRA & ADSC); // wait for ADC to finish
+	ADCSRA |= _BV(ADSC); // start conversion
+	while(ADCSRA & ADSC); // wait for ADC to finish
+
+	unsigned char adcValue = ADCH;
+
+	ADMUX = (ADMUX & 0xF0) | selTempPin; // select temp, keep rate the same
+	ADCSRA |= _BV(ADFR); // start free running ADC
+	ADCSRA |= _BV(ADSC) | _BV(ADIF); // start first conversion & clear interrupt flag
+
+	sei();
+	return adcValue;
 }
 
