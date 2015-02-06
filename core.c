@@ -16,7 +16,7 @@
 //#define CALIBRATE
 
 /** Defaults */
-const int fetDelay = 200; // 200 microseconds
+const unsigned int fetDelay = 200; // 200 microseconds
 const int defaultMinPulse = 2000; // 1 millisecond, in 0.5us ticks
 const int defaultMaxPulse = 4000; // 2 millisecond, in 0.5us ticks
 const int defaultMinPosition = 0; // pot fully down
@@ -39,8 +39,7 @@ int minPosition = 0;
 int maxPosition = 0;
 
 /** Pin Map */
-#define enbRCpin (DDRD &= !_BV(2)) // Port D, Pin 2 - RC signal input
-#define readRCpin (PIND &= _BV(2))
+#define readRCpin (PIND &= _BV(2)) // Port D, Pin 2 - RC signal input
 #define selTempPin 0b00000001 // Port C, Pin 1 - temperature sensor input
 #define selPosPin 0b00000010 // Port C, Pin 2 - position sensor input
 #define enbForwardHigh (DDRC |= _BV(5)) // Port C, Pin 5 - high side gate, forward
@@ -50,11 +49,11 @@ int maxPosition = 0;
 #define setForwardLow (PORTD |= _BV(5))
 #define clrForwardLow (PORTD &= !_BV(5))
 #define enbBackwardHigh (DDRD |= _BV(4)) // Port D, Pin 4 - high side gate, backwards
-#define clrBackwardHigh (PORTD |= _BV(4))
-#define setBackwardHigh (PORTD &= !_BV(4))
+#define setBackwardHigh (PORTD |= _BV(4))
+#define clrBackwardHigh (PORTD &= !_BV(4))
 #define enbBackwardLow (DDRC |= _BV(4))// Port C, Pin 4 - low side gate, backwards
-#define clrBackwardLow (PORTC |= _BV(4))
-#define setBackwardLow (PORTC &= !_BV(4))
+#define setBackwardLow (PORTC |= _BV(4))
+#define clrBackwardLow (PORTC &= !_BV(4))
 
 /** Prototypes */
 long map(long x, long in_min, long in_max, long out_min, long out_max);
@@ -67,6 +66,8 @@ void motorBeep(unsigned char length);
 int main(void) {
 	cli(); // disable global interrupts
 
+	_delay_ms(10); // let the power settle
+
 	// H-Bridge pin set up
 	enbForwardHigh;
 	enbForwardLow;
@@ -74,19 +75,21 @@ int main(void) {
 	enbBackwardLow;
 
 	// RC pin set up
-	enbRCpin;
 	MCUCR |= _BV(ISC00); // RC pin change triggers interrupt
 	GICR  |= _BV(INT0); // enable RC pin interrupt
 
 	// Timer 0 set up - control loop interrupt
+	TCNT0 = 0x00;
 	TCCR0 |= _BV(CS01) | _BV(CS00); // set to 250KHz, overflows @ 1KHz
 
 	// Timer 1 set up - RC pulse timing
+	TCNT1 = 0x0000;
 	TCCR1A = 0x00;
 	TCCR1B = _BV(CS11); // set to 2MHz, overflows @ 32.8ms, normal mode
 
 	// Timer 2 set up - H-Bridge PWM
 	OCR2  = 0x00;
+	TCNT2 = 0x00;
 	TCCR2 = _BV(CS21); // set to 2MHz, overflows @ 7.8KHz, normal mode, OC2 disconnected
 
 	// Timer interrupts
@@ -94,19 +97,19 @@ int main(void) {
 	TIMSK = _BV(OCIE2) | _BV(TOIE2) | _BV(TOIE1) | _BV(TOIE0); // enable all timers for overflow and timer2 match
 
 	/** Read EEPROM for saved values, if empty (0xFF) use defaults. */
-	minPulse = eeprom_read_word((unsigned int*)0x0000);
+	minPulse = eeprom_read_word((unsigned int*)0x0001);
 	if((unsigned int)minPulse == 0xFFFF) minPulse = defaultMinPulse;
-	maxPulse = eeprom_read_word((unsigned int*)0x0002);
+	maxPulse = eeprom_read_word((unsigned int*)0x0003);
 	if((unsigned int)maxPulse == 0xFFFF) maxPulse = defaultMaxPulse;
-	minPosition = eeprom_read_word((unsigned int*)0x0004);
+	minPosition = eeprom_read_word((unsigned int*)0x0005);
 	if((unsigned int)minPosition == 0xFFFF) minPosition = defaultMinPosition;
-	maxPosition = eeprom_read_word((unsigned int*)0x0006);
+	maxPosition = eeprom_read_word((unsigned int*)0x0007);
 	if((unsigned int)maxPosition == 0xFFFF) maxPosition = defaultMaxPosition;
 
 	// initialise states
+	tempState = cool;
 	requestedState = brake;
 	currentState = brake;
-	tempState = cool;
 	braking();
 
 	_delay_ms(100);
@@ -328,6 +331,7 @@ void goForwards(void) {
 	setForwardLow;
 	_delay_us(fetDelay);
 	setForwardHigh;
+	currentState = forwards;
 	sei();
 }
 
@@ -343,6 +347,7 @@ void goBackwards(void) {
 	setBackwardLow;
 	_delay_us(fetDelay);
 	setBackwardHigh;
+	currentState = backwards;
 	sei();
 }
 
@@ -357,6 +362,7 @@ void braking(void) {
 	_delay_us(fetDelay);
 	setForwardLow;
 	setBackwardLow;
+	currentState = brake;
 	_delay_ms(10);
 	sei();
 }
@@ -365,24 +371,28 @@ void braking(void) {
  *
  */
 void motorBeep(unsigned char length) {
-	OCR2 = 10;
+
 	unsigned char countBeep = 0;
+	unsigned char savedTimer0Ctrl = TCCR0;
+	TCCR0 = 0x00; // clear & stop timer0
+	OCR2 = 10;
+
 	while (countBeep < length)
 	{
-		if (countBeep % 2)
-		{
-			goForwards();
-		}
-		else
-		{
-			goBackwards();
-		}
+		if (countBeep % 2) goForwards();
+		else goBackwards();
+
 		_delay_ms(200);
 		countBeep++;
 		braking();
 		_delay_ms(300);
 	}
-	braking();
+
 	OCR2 = 0;
+
+	braking();
+
+	TCCR0 = savedTimer0Ctrl; // restart timer0
+
 }
 
