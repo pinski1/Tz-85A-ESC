@@ -13,6 +13,7 @@
 /** Mode selection */
 #define MODE_ESC
 //#define MODE_SERVO
+//#define MODE_ENDSTOP
 //#define CALIBRATE
 
 /** Defaults */
@@ -28,9 +29,10 @@ const int kDifferential = 0;
 const int maxSlew = 30;
 
 /** Globals */
-enum _state {forwards, brake, backwards} requestedState, currentState;
-enum _temp {cool, warm, hot} tempState;
+volatile enum _state {forwards, brake, backwards} requestedState, currentState;
+volatile enum _temp {cool, warm, hot} tempState;
 volatile int requestedVelocity = 0; // global speed & direction
+volatile int requestedSpeed = 0; // global speed
 volatile int requestedPosition = 0; // global requested position
 volatile int currentPosition = 0;   // global current position
 volatile char timeout = 0;
@@ -161,11 +163,11 @@ int main(void) {
 
 				// calibrate Temp
 
-				#ifdef MODE_SERVO
+				#ifdef MODE_SERVO || MODE_ENDSTOP
 
 				// calibrate pot
 
-				#endif // MODE_SERVO
+				#endif // MODE_SERVO || MODE_ENDSTOP
 
 				eeprom_write_word((unsigned int*)0x0001, 0xFFFF); // new minPulse
 				eeprom_write_word((unsigned int*)0x0003, 0xFFFF); // new maxPulse
@@ -228,10 +230,18 @@ ISR(TIMER0_OVF_vect) {
 	if(requestedVelocity < 0)
 	{
 		requestedState = backwards;
-		requestedVelocity = -requestedVelocity; // make positive value 0 - 255
+		requestedSpeed = -requestedVelocity; // make positive value 0 - 255
 	}
-	else if(requestedVelocity > 0) requestedState = forwards;
-	else requestedState = brake;
+	else if(requestedVelocity > 0)
+	{
+		requestedSpeed = requestedVelocity;
+		requestedState = forwards;
+	}
+	else
+	{
+		requestedSpeed = 0;
+		requestedState = brake;
+	}
 
 	// modify outputs
 	if(requestedState != currentState)
@@ -258,15 +268,15 @@ ISR(TIMER0_OVF_vect) {
 	}
 	else // fwd to fwd, brake to brake, bwd to bwd
 	{
-		if(requestedVelocity > OCR2)
+		if(requestedSpeed > OCR2)
 		{
-			if(requestedVelocity > (OCR2 + maxSlew)) OCR2 += maxSlew;
-			else OCR2 = requestedVelocity;
+			if(requestedSpeed > (OCR2 + maxSlew)) OCR2 += maxSlew;
+			else OCR2 = requestedSpeed;
 		}
-		else if(requestedVelocity < OCR2)
+		else if(requestedSpeed < OCR2)
 		{
-			if(requestedVelocity < (OCR2 - maxSlew)) OCR2 -= maxSlew;
-			else OCR2 = requestedVelocity;
+			if(requestedSpeed < (OCR2 - maxSlew)) OCR2 -= maxSlew;
+			else OCR2 = requestedSpeed;
 		}
 		// else do nothing
 	}
@@ -295,13 +305,21 @@ ISR(INT0_vect) {
 		if(pulseLength >= (unsigned int)minPulse && pulseLength <= (unsigned int)maxPulse) // valid pulse?
 		{
 			// valid pulse, therefore map to requested variable
-			#ifdef MODE_SERVO
+
+			#ifdef MODE_SERVO // proportional control
 				requestedPosition = map(pulseLength, minPulse, maxPulse, 0, 512); // map pulse to position
 				unsigned char readPosition = readAnalogue();
-				currentPosition = map(readPosition, minPosition, maxPosition, 0, 512); // get & map error signal
+				currentPosition = map(readPosition, minPosition, maxPosition, 0, 512); // map error signal
+			#elif MODE_ENDSTOP// soft end stops
+				requestedPosition = map(pulseLength, minPulse, maxPulse, -255, 255); // map pulse to speed
+				unsigned char readPosition = readAnalogue();
+				currentPosition = map(readPosition, minPosition, maxPosition, 0, 100); // map position percentage
+				if(currentPosition <= 10 && requestedPosition < 0) requestedVelocity = 0;
+				else if(currentPosition >= 90 && requestedPosition > 0) requestedVelocity = 0;
+				else requestedVelocity = requestedPosition;
 			#else // default to ESC mode
-				requestedVelocity = map(pulseLength, minPulse, maxPulse, -255, 255); // output value in -255 to +255
-			#endif // MODE_SERVO
+				requestedVelocity = map(pulseLength, minPulse, maxPulse, -255, 255); // map pulse to speed
+			#endif // MODE_SERVO, MODE_ENDSTOP & MODE_ESC
 
 			if(timeout < 3) timeout = 0; // clear timeout 3 times faster than it accumulates
 			else timeout -= 3;
