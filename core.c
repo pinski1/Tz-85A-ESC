@@ -7,16 +7,22 @@
 #include <avr/io.h>
 #include <util/delay.h>
 #include <avr/interrupt.h>
-//#include <math.h>
 #include <avr/eeprom.h>
 
 /** Mode selection */
-#define MODE_ESC
-//#define MODE_SERVO
-//#define MODE_ENDSTOP
+//#define MODE_ESC
+#define MODE_ENDSTOP
 //#define CALIBRATE
 
-/** Defaults */
+/** Saved values in EEPROM */
+unsigned  int EEMEM savedMinPulse = 2000;
+unsigned  int EEMEM savedMaxPulse = 4000;
+unsigned  int EEMEM savedMinPosition = 205;
+unsigned  int EEMEM savedMaxPosition = 105;
+unsigned char EEMEM savedTempHot = 170;
+unsigned char EEMEM savedTempWarm = 180;
+
+/** Default values */
 const unsigned int fetDelay = 200; // 200 microseconds
 const int defaultMinPulse = 2000; // 1 millisecond, in 0.4us ticks
 const int defaultMaxPulse = 4000; // 2 millisecond, in 0.4us ticks
@@ -24,15 +30,13 @@ const int defaultMinPosition = 0; // pot fully down
 const int defaultMaxPosition = 255; // pot fully up
 const unsigned char defaultTempHot = 170;
 const unsigned char defaultTempWarm = 180;
-const int kProportional = 1;
-const int kDifferential = 0;
-const int maxSlew = 30;
+const unsigned int maxSlew = 30;
 
-/** Globals */
+/** Global values */
 volatile enum _state {forwards, brake, backwards} requestedState, currentState;
 volatile enum _temp {cool, warm, hot} tempState;
+volatile enum _position {top, middle, bottom} positionState;
 volatile int requestedVelocity = 0; // global speed & direction
-volatile int requestedSpeed = 0; // global speed
 volatile int requestedPosition = 0; // global requested position
 volatile int currentPosition = 0;   // global current position
 volatile char timeout = 0;
@@ -67,7 +71,7 @@ void goForwards(void);
 void goBackwards(void);
 void braking(void);
 void motorBeep(unsigned char length);
-unsigned char readAnalogue(void);
+unsigned char readAnalogue(unsigned char channel);
 
 
 int main(void) {
@@ -104,21 +108,22 @@ int main(void) {
 	TIMSK = _BV(OCIE2) | _BV(TOIE2) | _BV(TOIE1) | _BV(TOIE0); // enable all timers for overflow and timer2 match
 
 	/** Read EEPROM for saved values, if empty (0xFF) use defaults. */
-	minPulse = eeprom_read_word((unsigned int*)0x0001);
+	minPulse = (signed)eeprom_read_word(&savedMinPulse);
 	if((unsigned int)minPulse == 0xFFFF) minPulse = defaultMinPulse;
-	maxPulse = eeprom_read_word((unsigned int*)0x0003);
+	maxPulse = (signed)eeprom_read_word(&savedMaxPulse);
 	if((unsigned int)maxPulse == 0xFFFF) maxPulse = defaultMaxPulse;
-	minPosition = eeprom_read_word((unsigned int*)0x0005);
+	minPosition = (signed)eeprom_read_word(&savedMinPosition);
 	if((unsigned int)minPosition == 0xFFFF) minPosition = defaultMinPosition;
-	maxPosition = eeprom_read_word((unsigned int*)0x0007);
+	maxPosition = (signed)eeprom_read_word(&savedMaxPosition);
 	if((unsigned int)maxPosition == 0xFFFF) maxPosition = defaultMaxPosition;
-	temperatureHot = eeprom_read_byte((unsigned char*)0x08);
+	temperatureHot = eeprom_read_byte(&savedTempHot);
 	if(temperatureHot == 0xFF) temperatureHot = defaultTempHot;
-	temperatureWarm = eeprom_read_byte((unsigned char*)0x09);
+	temperatureWarm = eeprom_read_byte(&savedTempWarm);
 	if(temperatureWarm == 0xFF) temperatureWarm = defaultTempWarm;
 
 	// initialise states
 	tempState = cool;
+	positionState = middle;
 	requestedState = brake;
 	currentState = brake;
 	braking();
@@ -126,10 +131,9 @@ int main(void) {
 	_delay_ms(100);
 
 	// ADC set up
-	ADCSRA |= _BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0); // set to 125KHz sample rate
-	ADMUX  |= _BV(REFS0) | _BV(ADLAR); // Set ADC reference to AVCC, left adjust ADC result
-	ADCSRA |= _BV(ADEN)  | _BV(ADIE) | _BV(ADIF); // enable ADC & interrupts, clear flag
-	ADCSRA |= _BV(ADFR)  | _BV(ADSC); // enable free running & start
+	ADMUX = _BV(REFS0) | _BV(ADLAR) | selTempPin; // ref to AVcc, left adjust, temperature pin
+	ADCSRA = _BV(ADEN) | _BV(ADIF) | _BV(ADIE) | _BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0); // enable ADC, clear and enable interrupt, 125kHz clock
+	ADCSRA |= _BV(ADSC); // start conversions
 
 	sei(); // enable global interrupts
 
@@ -163,18 +167,18 @@ int main(void) {
 
 				// calibrate Temp
 
-				#ifdef MODE_SERVO || MODE_ENDSTOP
+				#ifdef MODE_ENDSTOP
 
 				// calibrate pot
 
-				#endif // MODE_SERVO || MODE_ENDSTOP
+				#endif // MODE_ENDSTOP
 
-				eeprom_write_word((unsigned int*)0x0001, 0xFFFF); // new minPulse
-				eeprom_write_word((unsigned int*)0x0003, 0xFFFF); // new maxPulse
-				eeprom_write_word((unsigned int*)0x0005, 0xFFFF); // new minPosition
-				eeprom_write_word((unsigned int*)0x0007, 0xFFFF); // new maxPosition
-				eeprom_write_byte((unsigned char*)0x008, 0xFF);   // new temperatureHot
-				eeprom_write_byte((unsigned char*)0x009, 0xFF);   // new temperatureWarm
+				eeprom_update_word(&savedMinPulse, 0xFFFF); // new minPulse
+				eeprom_update_word(&savedMaxPulse, 0xFFFF); // new maxPulse
+				eeprom_update_word(&savedMinPosition, 0xFFFF); // new minPosition
+				eeprom_update_word(&savedMaxPosition, 0xFFFF); // new maxPosition
+				eeprom_update_byte(&savedTempHot, 0xFF);   // new temperatureHot
+				eeprom_update_byte(&savedTempWarm, 0xFF);   // new temperatureWarm
 
 				// signal completed calibration
 				motorBeep(2);
@@ -203,25 +207,19 @@ int main(void) {
  */
 ISR(TIMER0_OVF_vect) {
 
-	#ifdef MODE_SERVO
-	static int oldError = 0, currentError = 0;
-	oldError = currentError;
-
-	// sum
-	currentError = requestedPosition - currentPosition;
-
-	// PD calculation
-	requestedVelocity   = kProportional * currentError;
-	requestedVelocity  += kDifferential * (currentError - oldError);
-	#endif // MODE_SERVO
+	unsigned char requestedSpeed = 0; // local speed variable
 
 	// clamp
 	if(requestedVelocity > 255) requestedVelocity = 255;
 	if(requestedVelocity < -255) requestedVelocity = -255;
 
 	// temperature management
-	if(requestedVelocity < -128 && tempState == warm) requestedVelocity = -128;
 	if(requestedVelocity > 128 && tempState == warm) requestedVelocity = 128;
+	if(requestedVelocity < -128 && tempState == warm) requestedVelocity = -128;
+
+	// position management
+	if(requestedVelocity > 0 && positionState == top) requestedVelocity = 0;
+	if(requestedVelocity < 0 && positionState == bottom) requestedVelocity = 0;
 
 	// fault management
 	if(timeout >= 15 || failsafe >= 15) requestedVelocity = 0;
@@ -282,7 +280,7 @@ ISR(TIMER0_OVF_vect) {
 	}
 }
 
-/**
+/** RC pulse timeout handling
  *
  */
 ISR(TIMER1_OVF_vect) {
@@ -306,20 +304,7 @@ ISR(INT0_vect) {
 		{
 			// valid pulse, therefore map to requested variable
 
-			#ifdef MODE_SERVO // proportional control
-				requestedPosition = map(pulseLength, minPulse, maxPulse, 0, 512); // map pulse to position
-				unsigned char readPosition = readAnalogue();
-				currentPosition = map(readPosition, minPosition, maxPosition, 0, 512); // map error signal
-			#elif MODE_ENDSTOP// soft end stops
-				requestedPosition = map(pulseLength, minPulse, maxPulse, -255, 255); // map pulse to speed
-				unsigned char readPosition = readAnalogue();
-				currentPosition = map(readPosition, minPosition, maxPosition, 0, 100); // map position percentage
-				if(currentPosition <= 10 && requestedPosition < 0) requestedVelocity = 0;
-				else if(currentPosition >= 90 && requestedPosition > 0) requestedVelocity = 0;
-				else requestedVelocity = requestedPosition;
-			#else // default to ESC mode
-				requestedVelocity = map(pulseLength, minPulse, maxPulse, -255, 255); // map pulse to speed
-			#endif // MODE_SERVO, MODE_ENDSTOP & MODE_ESC
+			requestedVelocity = map(pulseLength, minPulse, maxPulse, -255, 255); // map pulse to speed
 
 			if(timeout < 3) timeout = 0; // clear timeout 3 times faster than it accumulates
 			else timeout -= 3;
@@ -377,18 +362,43 @@ ISR(TIMER2_OVF_vect) {
     }
 }
 
-/**
+/** Updates the temperature & position state
  *
  */
 ISR(ADC_vect) {
 
-	if (ADCH < temperatureHot)
+	static unsigned char chanTemp = 0x0F; // true = temperature, false = position
+	unsigned int position;
+
+	ADCSRA |= _BV(ADIF); // clear ADC interrupt flag
+
+	if(chanTemp)
 	{
-		tempState = hot;
-		requestedState = brake;
+		if (ADCH < temperatureHot)
+		{
+			tempState = hot;
+			requestedState = brake;
+		}
+		else if(ADCH < temperatureWarm) tempState = warm;
+
 	}
-	else if (ADCH < temperatureWarm) tempState = warm;
-	else tempState = cool;
+	else
+	{
+		position = map(ADCH, minPosition, maxPosition, 0, 100);
+
+		if(position > 90) positionState = top;
+		else if(position < 10) positionState = bottom;
+		else positionState = middle;
+	}
+
+	#ifdef MODE_ENDSTOP
+		chanTemp = chanTemp? 0 : 1; // invert if MODE_ENDSTOP
+	#endif // MODE_ENDSTOP
+
+	if(chanTemp) ADMUX = (ADMUX & 0xF0) | (selTempPin & 0x0F);
+	else ADMUX = (ADMUX & 0xF0) | (selPosPin & 0x0F);
+
+	ADCSRA |= _BV(ADSC); // start conversion
 }
 
 /** Re-maps a number from one range to another.
@@ -404,7 +414,7 @@ long map(long x, long in_min, long in_max, long out_min, long out_max) {
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-/**
+/** Configures the H-Bridge to move the motor forwards
  *
  */
 void goForwards(void) {
@@ -420,7 +430,7 @@ void goForwards(void) {
 	sei();
 }
 
-/**
+/** Configures the H-Bridge to move the motor backwards
  *
  */
 void goBackwards(void) {
@@ -436,7 +446,7 @@ void goBackwards(void) {
 	sei();
 }
 
-/**
+/** Configures the H-Bridge to short both side of the motor
  *
  */
 void braking(void) {
@@ -452,7 +462,7 @@ void braking(void) {
 	sei();
 }
 
-/**
+/** Pulses the motor quickly to generate beeps
  *
  */
 void motorBeep(unsigned char length) {
@@ -479,29 +489,5 @@ void motorBeep(unsigned char length) {
 
 	TCCR0 = savedTimer0Ctrl; // restart timer0
 
-}
-
-/**
- *
- */
-unsigned char readAnalogue(void) {
-
-	cli();
-
-	ADCSRA &= ~_BV(ADFR); // stop free running ADC
-	ADMUX = (ADMUX & 0xF0) | selPosPin; // select pot, keep rate the same
-
-	while(ADCSRA & ADSC); // wait for ADC to finish
-	ADCSRA |= _BV(ADSC); // start conversion
-	while(ADCSRA & ADSC); // wait for ADC to finish
-
-	unsigned char adcValue = ADCH;
-
-	ADMUX = (ADMUX & 0xF0) | selTempPin; // select temp, keep rate the same
-	ADCSRA |= _BV(ADFR); // start free running ADC
-	ADCSRA |= _BV(ADSC) | _BV(ADIF); // start first conversion & clear interrupt flag
-
-	sei();
-	return adcValue;
 }
 
