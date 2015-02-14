@@ -10,17 +10,17 @@
 #include <avr/eeprom.h>
 
 /** Mode selection */
-//#define MODE_ESC
-#define MODE_ENDSTOP
+#define MODE_ESC
+//#define MODE_ENDSTOP
 //#define CALIBRATE
 
 /** Saved values in EEPROM */
-unsigned  int EEMEM savedMinPulse = 2000;
-unsigned  int EEMEM savedMaxPulse = 4000;
-unsigned  int EEMEM savedMinPosition = 205;
-unsigned  int EEMEM savedMaxPosition = 105;
-unsigned char EEMEM savedTempHot = 170;
-unsigned char EEMEM savedTempWarm = 180;
+unsigned  int EEMEM savedMinPulse;
+unsigned  int EEMEM savedMaxPulse;
+unsigned  int EEMEM savedMinPosition;
+unsigned  int EEMEM savedMaxPosition;
+unsigned char EEMEM savedTempHot;
+unsigned char EEMEM savedTempWarm;
 
 /** Default values */
 const unsigned int fetDelay = 200; // 200 microseconds
@@ -34,11 +34,9 @@ const unsigned int maxSlew = 30;
 
 /** Global values */
 volatile enum _state {forwards, brake, backwards} requestedState, currentState;
-volatile enum _temp {cool, warm, hot} tempState;
+volatile enum _temp {cool, warm, hot} temperatureState;
 volatile enum _position {top, middle, bottom} positionState;
 volatile int requestedVelocity = 0; // global speed & direction
-volatile int requestedPosition = 0; // global requested position
-volatile int currentPosition = 0;   // global current position
 volatile char timeout = 0;
 volatile char failsafe = 0;
 int minPulse = 0;
@@ -71,7 +69,6 @@ void goForwards(void);
 void goBackwards(void);
 void braking(void);
 void motorBeep(unsigned char length);
-unsigned char readAnalogue(unsigned char channel);
 
 
 int main(void) {
@@ -92,6 +89,7 @@ int main(void) {
 	// Timer 0 set up - control loop interrupt
 	TCNT0 = 0x00;
 	TCCR0 |= _BV(CS01) | _BV(CS00); // set to 250KHz, overflows @ 1KHz
+	//TCCR0 |= _BV(CS02); // set to 62.5 KHz, overflows @ 245Hz
 
 	// Timer 1 set up - RC pulse timing
 	TCNT1 = 0x0000;
@@ -104,8 +102,12 @@ int main(void) {
 	TCCR2 = _BV(CS21); // set to 2MHz, overflows @ 7.8KHz, normal mode, OC2 disconnected
 
 	// Timer interrupts
-	TIFR  = 0x00; // clear flags
+	TIFR  = 0xFF; // clear timer flags
 	TIMSK = _BV(OCIE2) | _BV(TOIE2) | _BV(TOIE1) | _BV(TOIE0); // enable all timers for overflow and timer2 match
+
+	// ADC set up
+	ADMUX = _BV(REFS0) | _BV(ADLAR) | selTempPin; // ref to AVcc, left adjust, temperature pin
+	ADCSRA = _BV(ADEN) | _BV(ADIF) | _BV(ADIE) | _BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0); // enable ADC, clear and enable interrupt, 125kHz clock
 
 	/** Read EEPROM for saved values, if empty (0xFF) use defaults. */
 	minPulse = (signed)eeprom_read_word(&savedMinPulse);
@@ -117,12 +119,12 @@ int main(void) {
 	maxPosition = (signed)eeprom_read_word(&savedMaxPosition);
 	if((unsigned int)maxPosition == 0xFFFF) maxPosition = defaultMaxPosition;
 	temperatureHot = eeprom_read_byte(&savedTempHot);
-	if(temperatureHot == 0xFF) temperatureHot = defaultTempHot;
+	if((unsigned char)temperatureHot == 0xFF) temperatureHot = defaultTempHot;
 	temperatureWarm = eeprom_read_byte(&savedTempWarm);
-	if(temperatureWarm == 0xFF) temperatureWarm = defaultTempWarm;
+	if((unsigned char)temperatureWarm == 0xFF) temperatureWarm = defaultTempWarm;
 
 	// initialise states
-	tempState = cool;
+	temperatureState = cool;
 	positionState = middle;
 	requestedState = brake;
 	currentState = brake;
@@ -130,14 +132,9 @@ int main(void) {
 
 	_delay_ms(100);
 
-	// ADC set up
-	ADMUX = _BV(REFS0) | _BV(ADLAR) | selTempPin; // ref to AVcc, left adjust, temperature pin
-	ADCSRA = _BV(ADEN) | _BV(ADIF) | _BV(ADIE) | _BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0); // enable ADC, clear and enable interrupt, 125kHz clock
-	ADCSRA |= _BV(ADSC); // start conversions
-
 	sei(); // enable global interrupts
 
-	// Finished initializing the Motor Controller
+	// Finished initialising the Motor Controller
 
 	#ifdef CALIBRATE
 
@@ -196,6 +193,8 @@ int main(void) {
 
 	motorBeep(3);
 
+	ADCSRA |= _BV(ADSC); // start ADC conversions
+
 	while(1);
 	// all following actions are carried out as the result of interrupts
 
@@ -213,9 +212,12 @@ ISR(TIMER0_OVF_vect) {
 	if(requestedVelocity > 255) requestedVelocity = 255;
 	if(requestedVelocity < -255) requestedVelocity = -255;
 
+	// artificial dead band
+	if(requestedVelocity < 5 && requestedVelocity > -5) requestedVelocity = 0;
+
 	// temperature management
-	if(requestedVelocity > 128 && tempState == warm) requestedVelocity = 128;
-	if(requestedVelocity < -128 && tempState == warm) requestedVelocity = -128;
+	if(requestedVelocity > 128 && temperatureState == warm) requestedVelocity = 128;
+	if(requestedVelocity < -128 && temperatureState == warm) requestedVelocity = -128;
 
 	// position management
 	if(requestedVelocity > 0 && positionState == top) requestedVelocity = 0;
@@ -232,13 +234,13 @@ ISR(TIMER0_OVF_vect) {
 	}
 	else if(requestedVelocity > 0)
 	{
-		requestedSpeed = requestedVelocity;
 		requestedState = forwards;
+		requestedSpeed = requestedVelocity;
 	}
 	else
 	{
-		requestedSpeed = 0;
 		requestedState = brake;
+		requestedSpeed = 0;
 	}
 
 	// modify outputs
@@ -249,8 +251,6 @@ ISR(TIMER0_OVF_vect) {
 			// set pins & direction
 			if(requestedState == forwards) goForwards();
 			else goBackwards();
-
-			// requestedState = currentState, speed increases will be done elsewhere.
 		}
 		else // fwd to bwk or bwk to fwd
 		{
@@ -266,15 +266,15 @@ ISR(TIMER0_OVF_vect) {
 	}
 	else // fwd to fwd, brake to brake, bwd to bwd
 	{
-		if(requestedSpeed > OCR2)
+		if((char)requestedSpeed > OCR2)
 		{
-			if(requestedSpeed > (OCR2 + maxSlew)) OCR2 += maxSlew;
-			else OCR2 = requestedSpeed;
+			if((char)requestedSpeed > (OCR2 + maxSlew)) OCR2 += maxSlew;
+			else OCR2 = (char)requestedSpeed;
 		}
-		else if(requestedSpeed < OCR2)
+		else if((char)requestedSpeed < OCR2)
 		{
-			if(requestedSpeed < (OCR2 - maxSlew)) OCR2 -= maxSlew;
-			else OCR2 = requestedSpeed;
+			if((char)requestedSpeed < (OCR2 - maxSlew)) OCR2 -= maxSlew;
+			else OCR2 = (char)requestedSpeed;
 		}
 		// else do nothing
 	}
@@ -302,8 +302,6 @@ ISR(INT0_vect) {
 
 		if(pulseLength >= (unsigned int)minPulse && pulseLength <= (unsigned int)maxPulse) // valid pulse?
 		{
-			// valid pulse, therefore map to requested variable
-
 			requestedVelocity = map(pulseLength, minPulse, maxPulse, -255, 255); // map pulse to speed
 
 			if(timeout < 3) timeout = 0; // clear timeout 3 times faster than it accumulates
@@ -314,8 +312,7 @@ ISR(INT0_vect) {
 		}
 		else
 		{
-			// invalid pulse length
-			if(failsafe < 30) failsafe ++;
+			if(failsafe < 30) failsafe ++; // invalid pulse length
 		}
 	}
 }
@@ -367,36 +364,36 @@ ISR(TIMER2_OVF_vect) {
  */
 ISR(ADC_vect) {
 
-	static unsigned char chanTemp = 0x0F; // true = temperature, false = position
-	unsigned int position;
+	static enum _adcChannel {temperature, position} adcChannel = temperature;
+	int positionPercent = 0;
 
-	ADCSRA |= _BV(ADIF); // clear ADC interrupt flag
-
-	if(chanTemp)
+	if(adcChannel == temperature)
 	{
 		if (ADCH < temperatureHot)
 		{
-			tempState = hot;
+			temperatureState = hot;
 			requestedState = brake;
 		}
-		else if(ADCH < temperatureWarm) tempState = warm;
+		else if(ADCH < temperatureWarm) temperatureState = warm;
 
+		#ifdef MODE_ENDSTOP
+		adcChannel = position;
+		ADMUX = (ADMUX & 0xF0) | (selPosPin & 0x0F);
 	}
 	else
 	{
-		position = map(ADCH, minPosition, maxPosition, 0, 100);
+		positionPercent = (ADCH - minPosition) * (100 - 0) / (maxPosition - minPosition) + 0;
 
-		if(position > 90) positionState = top;
-		else if(position < 10) positionState = bottom;
+		//if(position > 105 || position < -5) //ERROR!
+
+		if(positionPercent > 90) positionState = top;
+		else if(positionPercent < 10) positionState = bottom;
 		else positionState = middle;
+		#endif // MODE_ENDSTOP
+
+		adcChannel = temperature;
+		ADMUX = (ADMUX & 0xF0) | (selTempPin & 0x0F);
 	}
-
-	#ifdef MODE_ENDSTOP
-		chanTemp = chanTemp? 0 : 1; // invert if MODE_ENDSTOP
-	#endif // MODE_ENDSTOP
-
-	if(chanTemp) ADMUX = (ADMUX & 0xF0) | (selTempPin & 0x0F);
-	else ADMUX = (ADMUX & 0xF0) | (selPosPin & 0x0F);
 
 	ADCSRA |= _BV(ADSC); // start conversion
 }
@@ -468,8 +465,9 @@ void braking(void) {
 void motorBeep(unsigned char length) {
 
 	unsigned char countBeep = 0;
-	unsigned char savedTimer0Ctrl = TCCR0;
-	TCCR0 = 0x00; // clear & stop timer0
+
+	TIMSK &= ~_BV(TOIE0); // disable timer0 interrupts for a bit
+
 	OCR2 = 10;
 
 	while (countBeep < length)
@@ -487,7 +485,8 @@ void motorBeep(unsigned char length) {
 
 	braking();
 
-	TCCR0 = savedTimer0Ctrl; // restart timer0
+	TIFR  |= _BV(TOV0); // clear flag just in case
+	TIMSK |= _BV(TOIE0); // re-enable timer0 interrupts
 
 }
 
