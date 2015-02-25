@@ -15,12 +15,12 @@
 //#define CALIBRATE
 
 /** Saved values in EEPROM */
-unsigned  int EEMEM savedMinPulse;
-unsigned  int EEMEM savedMaxPulse;
-unsigned  int EEMEM savedMinPosition;
-unsigned  int EEMEM savedMaxPosition;
-unsigned char EEMEM savedTempHot;
-unsigned char EEMEM savedTempWarm;
+unsigned  int EEMEM savedMinPulse = 2000;
+unsigned  int EEMEM savedMaxPulse = 4000;
+unsigned  int EEMEM savedMinPosition = 205;
+unsigned  int EEMEM savedMaxPosition = 135;
+unsigned char EEMEM savedTempHot = 170;
+unsigned char EEMEM savedTempWarm = 180;
 
 /** Default values */
 const unsigned int fetDelay = 200; // 200 microseconds
@@ -31,6 +31,7 @@ const int defaultMaxPosition = 255; // pot fully up
 const unsigned char defaultTempHot = 170;
 const unsigned char defaultTempWarm = 180;
 const unsigned int maxSlew = 30;
+const unsigned int deadBand = 5;
 
 /** Global values */
 volatile enum _state {forwards, brake, backwards} requestedState, currentState;
@@ -212,9 +213,6 @@ ISR(TIMER0_OVF_vect) {
 	if(requestedVelocity > 255) requestedVelocity = 255;
 	if(requestedVelocity < -255) requestedVelocity = -255;
 
-	// artificial dead band
-	if(requestedVelocity < 5 && requestedVelocity > -5) requestedVelocity = 0;
-
 	// temperature management
 	if(requestedVelocity > 128 && temperatureState == warm) requestedVelocity = 128;
 	if(requestedVelocity < -128 && temperatureState == warm) requestedVelocity = -128;
@@ -302,7 +300,10 @@ ISR(INT0_vect) {
 
 		if(pulseLength >= (unsigned int)minPulse && pulseLength <= (unsigned int)maxPulse) // valid pulse?
 		{
-			requestedVelocity = map(pulseLength, minPulse, maxPulse, -255, 255); // map pulse to speed
+			requestedVelocity = map(pulseLength, minPulse, maxPulse, -255 - deadBand, 255 + deadBand); // map pulse to speed
+			if(requestedVelocity >= -(int)deadBand && requestedVelocity <= (int)deadBand) requestedVelocity = 0; // deadband adjustment
+			else if(requestedVelocity > 0) requestedVelocity -= deadBand;
+			else if(requestedVelocity < 0) requestedVelocity += deadBand;
 
 			if(timeout < 3) timeout = 0; // clear timeout 3 times faster than it accumulates
 			else timeout -= 3;
@@ -365,7 +366,6 @@ ISR(TIMER2_OVF_vect) {
 ISR(ADC_vect) {
 
 	static enum _adcChannel {temperature, position} adcChannel = temperature;
-	int positionPercent = 0;
 
 	if(adcChannel == temperature)
 	{
@@ -382,7 +382,7 @@ ISR(ADC_vect) {
 	}
 	else
 	{
-		positionPercent = (ADCH - minPosition) * (100 - 0) / (maxPosition - minPosition) + 0;
+		int positionPercent = (ADCH - minPosition) * (100 - 0) / (maxPosition - minPosition) + 0;
 
 		//if(position > 105 || position < -5) //ERROR!
 
