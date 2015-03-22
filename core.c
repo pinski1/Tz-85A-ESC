@@ -10,28 +10,28 @@
 #include <avr/eeprom.h>
 
 /** Mode selection */
-#define MODE_ESC
-//#define MODE_ENDSTOP
+//#define MODE_ESC
+#define MODE_ENDSTOP
 //#define CALIBRATE
 
 /** Saved values in EEPROM */
-unsigned  int EEMEM savedMinPulse = 2000;
-unsigned  int EEMEM savedMaxPulse = 4000;
-unsigned  int EEMEM savedMinPosition = 205;
-unsigned  int EEMEM savedMaxPosition = 135;
-unsigned char EEMEM savedTempHot = 170;
-unsigned char EEMEM savedTempWarm = 180;
+unsigned  int EEMEM savedMinPulse;
+unsigned  int EEMEM savedMaxPulse;
+unsigned  int EEMEM savedMinPosition;
+unsigned  int EEMEM savedMaxPosition;
+unsigned char EEMEM savedTempHot;
+unsigned char EEMEM savedTempWarm;
 
 /** Default values */
-const unsigned int fetDelay = 200; // 200 microseconds
-const int defaultMinPulse = 2000; // 1 millisecond, in 0.4us ticks
-const int defaultMaxPulse = 4000; // 2 millisecond, in 0.4us ticks
+const unsigned int fetDelay = 200; // in microseconds
+const int defaultMinPulse = 2000; // 1 millisecond, in 0.5us ticks
+const int defaultMaxPulse = 4000; // 2 millisecond, in 0.5us ticks
 const int defaultMinPosition = 0; // pot fully down
 const int defaultMaxPosition = 255; // pot fully up
 const unsigned char defaultTempHot = 170;
 const unsigned char defaultTempWarm = 180;
-const unsigned int maxSlew = 30;
-const unsigned int deadBand = 5;
+const int maxSlew = 30;
+const int deadBand = 5;
 
 /** Global values */
 volatile enum _state {forwards, brake, backwards} requestedState, currentState;
@@ -65,7 +65,7 @@ unsigned char temperatureWarm = 0;
 #define clrBackwardLow (PORTC &= ~_BV(4))
 
 /** Prototypes */
-long map(long x, long in_min, long in_max, long out_min, long out_max);
+inline long map(long x, long in_min, long in_max, long out_min, long out_max);
 void goForwards(void);
 void goBackwards(void);
 void braking(void);
@@ -89,8 +89,8 @@ int main(void) {
 
 	// Timer 0 set up - control loop interrupt
 	TCNT0 = 0x00;
-	TCCR0 |= _BV(CS01) | _BV(CS00); // set to 250KHz, overflows @ 1KHz
-	//TCCR0 |= _BV(CS02); // set to 62.5 KHz, overflows @ 245Hz
+	//TCCR0 |= _BV(CS01) | _BV(CS00); // set to 250KHz, overflows @ 1KHz
+	TCCR0 |= _BV(CS02); // set to 62.5 KHz, overflows @ 245Hz
 
 	// Timer 1 set up - RC pulse timing
 	TCNT1 = 0x0000;
@@ -124,7 +124,7 @@ int main(void) {
 	temperatureWarm = eeprom_read_byte(&savedTempWarm);
 	if((unsigned char)temperatureWarm == 0xFF) temperatureWarm = defaultTempWarm;
 
-	// initialise states
+	/** initialise states */
 	temperatureState = cool;
 	positionState = middle;
 	requestedState = brake;
@@ -202,38 +202,37 @@ int main(void) {
 	return 0;
 }
 
-/** Motor value calculations
- *
- */
+/** Motor value calculations */
 ISR(TIMER0_OVF_vect) {
 
+	int requestedVelocityLocal = requestedVelocity;
 	unsigned char requestedSpeed = 0; // local speed variable
 
 	// clamp
-	if(requestedVelocity > 255) requestedVelocity = 255;
-	if(requestedVelocity < -255) requestedVelocity = -255;
+	if(requestedVelocityLocal >  255) requestedVelocityLocal =  255;
+	if(requestedVelocityLocal < -255) requestedVelocityLocal = -255;
 
 	// temperature management
-	if(requestedVelocity > 128 && temperatureState == warm) requestedVelocity = 128;
-	if(requestedVelocity < -128 && temperatureState == warm) requestedVelocity = -128;
+	if(requestedVelocityLocal >  128 && temperatureState == warm) requestedVelocityLocal =  128;
+	if(requestedVelocityLocal < -128 && temperatureState == warm) requestedVelocityLocal = -128;
 
 	// position management
-	if(requestedVelocity > 0 && positionState == top) requestedVelocity = 0;
-	if(requestedVelocity < 0 && positionState == bottom) requestedVelocity = 0;
+	if(requestedVelocityLocal > 0 && positionState == top)    requestedVelocityLocal = 0;
+	if(requestedVelocityLocal < 0 && positionState == bottom) requestedVelocityLocal = 0;
 
 	// fault management
-	if(timeout >= 15 || failsafe >= 15) requestedVelocity = 0;
+	if(timeout >= 15 || failsafe >= 15) requestedVelocityLocal = 0;
 
-	// convert requestedVelocity to requestedState
-	if(requestedVelocity < 0)
+	// convert requestedVelTemp to requestedState
+	if(requestedVelocityLocal < 0)
 	{
 		requestedState = backwards;
-		requestedSpeed = -requestedVelocity; // make positive value 0 - 255
+		requestedSpeed = (unsigned char)-requestedVelocityLocal; // make positive value 0 - 255
 	}
-	else if(requestedVelocity > 0)
+	else if(requestedVelocityLocal > 0)
 	{
 		requestedState = forwards;
-		requestedSpeed = requestedVelocity;
+		requestedSpeed = (unsigned char)requestedVelocityLocal;
 	}
 	else
 	{
@@ -278,32 +277,29 @@ ISR(TIMER0_OVF_vect) {
 	}
 }
 
-/** RC pulse timeout handling
- *
- */
+/** RC pulse timeout handling */
 ISR(TIMER1_OVF_vect) {
 	// no pulse received in 32.767 milliseconds
 	if(timeout < 30) timeout ++;
 }
 
-/** RC pulse capture
- *
- */
+/** RC pulse capture */
 ISR(INT0_vect) {
 
 	unsigned int pulseLength;
+	int requestedVelocityLocal = 0; // local storage of velocity
 
-	if(readRCpin) TCNT1 = 0x0000; // clear timer1
-	else
+	if(readRCpin) TCNT1 = 0x0000; // clear timer1 if rising edge
+	else // falling edge
 	{
-		pulseLength = TCNT1; // copy timer1
+		pulseLength = TCNT1; // save a local copy of timer1
 
 		if(pulseLength >= (unsigned int)minPulse && pulseLength <= (unsigned int)maxPulse) // valid pulse?
 		{
-			requestedVelocity = map(pulseLength, minPulse, maxPulse, -255 - deadBand, 255 + deadBand); // map pulse to speed
-			if(requestedVelocity >= -(int)deadBand && requestedVelocity <= (int)deadBand) requestedVelocity = 0; // deadband adjustment
-			else if(requestedVelocity > 0) requestedVelocity -= deadBand;
-			else if(requestedVelocity < 0) requestedVelocity += deadBand;
+			requestedVelocityLocal = map(pulseLength, minPulse, maxPulse, (-255 - deadBand), (255 + deadBand)); // map pulse to speed
+			if(requestedVelocityLocal >= -deadBand && requestedVelocityLocal <= deadBand) requestedVelocity = 0; // dead band adjustment
+			else if(requestedVelocityLocal > 0) requestedVelocity = (int)requestedVelocityLocal - deadBand;
+			else if(requestedVelocityLocal < 0) requestedVelocity = (int)requestedVelocityLocal + deadBand;
 
 			if(timeout < 3) timeout = 0; // clear timeout 3 times faster than it accumulates
 			else timeout -= 3;
@@ -318,9 +314,7 @@ ISR(INT0_vect) {
 	}
 }
 
-/** When comparator is triggered clear low ports (off part of PWM cycle)
- *
- */
+/** When comparator is triggered clear low ports (off part of PWM cycle) */
 ISR(TIMER2_COMP_vect) {
 
 	if (OCR2 < 255)
@@ -333,9 +327,7 @@ ISR(TIMER2_COMP_vect) {
     }
 }
 
-/** When timer overflows enable low port for current state
- *
- */
+/** When timer overflows enable low port for current state */
 ISR(TIMER2_OVF_vect) {
 
 	static unsigned char counterCharge = 0;
@@ -360,9 +352,7 @@ ISR(TIMER2_OVF_vect) {
     }
 }
 
-/** Updates the temperature & position state
- *
- */
+/** Updates the temperature & position state */
 ISR(ADC_vect) {
 
 	static enum _adcChannel {temperature, position} adcChannel = temperature;
@@ -383,8 +373,6 @@ ISR(ADC_vect) {
 	else
 	{
 		int positionPercent = (ADCH - minPosition) * (100 - 0) / (maxPosition - minPosition) + 0;
-
-		//if(position > 105 || position < -5) //ERROR!
 
 		if(positionPercent > 90) positionState = top;
 		else if(positionPercent < 10) positionState = bottom;
@@ -407,13 +395,11 @@ ISR(ADC_vect) {
  * @param out_max The upper bound of the target range.
  * @returns The mapped number.
  */
-long map(long x, long in_min, long in_max, long out_min, long out_max) {
+inline long map(long x, long in_min, long in_max, long out_min, long out_max) {
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-/** Configures the H-Bridge to move the motor forwards
- *
- */
+/** Configures the H-Bridge to move the motor forwards */
 void goForwards(void) {
 
 	cli();
@@ -427,9 +413,7 @@ void goForwards(void) {
 	sei();
 }
 
-/** Configures the H-Bridge to move the motor backwards
- *
- */
+/** Configures the H-Bridge to move the motor backwards */
 void goBackwards(void) {
 
 	cli();
@@ -443,9 +427,7 @@ void goBackwards(void) {
 	sei();
 }
 
-/** Configures the H-Bridge to short both side of the motor
- *
- */
+/** Configures the H-Bridge to short both side of the motor */
 void braking(void) {
 
 	cli();
@@ -459,9 +441,7 @@ void braking(void) {
 	sei();
 }
 
-/** Pulses the motor quickly to generate beeps
- *
- */
+/** Pulses the motor quickly to generate beeps */
 void motorBeep(unsigned char length) {
 
 	unsigned char countBeep = 0;

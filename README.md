@@ -7,9 +7,11 @@ Firmware for the popular Tz-85A brushless speed controller to modify it to contr
 
 <!-- add instructions
 1. Remove plastic casing.
-2. Snip off wire on *tive side.
+2. Snip off wire on negative side.
 3. Remove switch & short pads. (OPTIONAL)
-4. Lift pin ? and connect POT wires (OPTIONAL)
+4. Lift pin 25 and connect the wiper wire (OPTIONAL)
+5. Connect the +Vcc wire to the inner leg of the LM2940 (OPTIONAL)
+6. Connect the 0V wire to the inner side of the capacitors by the switch pads (OPTIONAL)
 -->
 
 ##Programming
